@@ -19,14 +19,8 @@ from turnpike.flight.server import run_flight_server
 from turnpike.flight.client_node import FlightNode
 
 # Import our custom nodes
-try:
-    # When installed as a package
-    from nj_turnpike.identity_node import IdentityNode
-    from nj_turnpike.double_flight_node import DoubleValueNode
-except ImportError:
-    # When running from the repository root
-    from src.identity_node import IdentityNode
-    from src.double_flight_node import DoubleValueNode
+from nj_turnpike.identity_node import IdentityNode
+from nj_turnpike.double_flight_node import DoubleValueNode
 
 
 class TollDataFanOutNode(FlightNode):

@@ -74,7 +74,6 @@ class DoubleValueNode(FlightNode):
             """
         
         # Initialize the parent FlightNode with our custom SQL
-        # Updated to match new FlightNode API which uses 'expression' instead of 'sql'
         super().__init__(
             expression=sql,
             input_table=input_table,

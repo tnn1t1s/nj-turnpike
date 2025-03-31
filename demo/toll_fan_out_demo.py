@@ -13,12 +13,7 @@ from datetime import datetime
 import pandas as pd
 from tabulate import tabulate
 
-try:
-    # When installed as a package
-    from nj_turnpike.double_flight_node import DoubleValueNode
-except ImportError:
-    # When running from the repository root
-    from src.double_flight_node import DoubleValueNode
+from nj_turnpike.double_flight_node import DoubleValueNode
 
 try:
     from demo.custom_nodes_demo import TollDataFanOutNode

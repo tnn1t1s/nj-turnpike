@@ -7,14 +7,8 @@ import pyarrow as pa
 import numpy as np
 from datetime import datetime
 
-try:
-    # When installed as a package
-    from nj_turnpike.identity_node import IdentityNode
-    from nj_turnpike.double_flight_node import DoubleValueNode
-except ImportError:
-    # When running from the repository root
-    from src.identity_node import IdentityNode
-    from src.double_flight_node import DoubleValueNode
+from nj_turnpike.identity_node import IdentityNode
+from nj_turnpike.double_flight_node import DoubleValueNode
 
 try:
     # Try to import from demo

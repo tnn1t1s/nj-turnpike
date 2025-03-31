@@ -6,13 +6,17 @@ setup(
     description="Custom nodes for the Turnpike framework",
     author="NJ Turnpike Team",
     author_email="example@example.com",
-    url="https://github.com/yourusername/nj-turnpike",
+    url="https://github.com/tnn1t1s/nj-turnpike",
     packages=find_packages(),
+    include_package_data=True,
     install_requires=[
         "turnpike @ git+https://github.com/tnn1t1s/turnpike.git",
         "pyarrow>=7.0.0",
         "ibis-framework",
         "duckdb",
+        "numpy",
+        "pandas",
+        "tabulate",
     ],
     python_requires=">=3.9",
     classifiers=[
