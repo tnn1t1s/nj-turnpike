@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nj-turnpike"
+version = "0.1.0"
+description = "Custom nodes for the Turnpike framework"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "NJ Turnpike Team", email = "example@example.com"}
+]
+dependencies = [
+    "turnpike @ git+https://github.com/tnn1t1s/turnpike.git",
+    "pyarrow>=7.0.0",
+    "ibis-framework",
+    "duckdb",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/nj-turnpike"
+Repository = "https://github.com/yourusername/nj-turnpike.git"
+
+[tool.pytest]
+testpaths = ["tests"]
