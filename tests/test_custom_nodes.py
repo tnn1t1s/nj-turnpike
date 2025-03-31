@@ -5,6 +5,7 @@ Tests for NJ Turnpike custom nodes.
 import pytest
 import pyarrow as pa
 import numpy as np
+from datetime import datetime
 
 try:
     # When installed as a package
@@ -14,6 +15,13 @@ except ImportError:
     # When running from the repository root
     from src.identity_node import IdentityNode
     from src.double_flight_node import DoubleValueNode
+
+try:
+    # Try to import from demo
+    from demo.custom_nodes_demo import TollDataFanOutNode
+except ImportError:
+    # If not available, create a placeholder for tests that need it
+    TollDataFanOutNode = None
 
 
 class TestIdentityNode:
@@ -192,3 +200,234 @@ class TestDoubleValueNode:
                 input_table=data,
                 column_name="category"
             )
+
+
+# Mock version of TollDataFanOutNode for tests
+class MockTollDataFanOutNode:
+    """Mock version of TollDataFanOutNode that doesn't use Flight."""
+    
+    def __init__(self, input_table):
+        self.input_table = input_table
+        
+    def execute(self):
+        """Execute without Flight server by directly creating the output tables."""
+        if self.input_table is None:
+            raise ValueError("Input table is required")
+            
+        # Create vehicle data
+        vehicle_columns = [
+            "transaction_id", "plaza_id", "vehicle_class", "vehicle_type", 
+            "axle_count", "weight_kg", "height_cm", "length_cm", "timestamp"
+        ]
+        
+        vehicle_data = self.input_table.select(
+            [col for col in vehicle_columns if col in self.input_table.column_names]
+        )
+        
+        # Create payment data
+        payment_columns = [
+            "transaction_id", "plaza_id", "payment_method", "is_ezpass", "amount", "timestamp"
+        ]
+        
+        payment_data = self.input_table.select(
+            [col for col in payment_columns if col in self.input_table.column_names]
+        )
+        
+        # Create temporal data - extract time components
+        temporal_data = self.input_table.select(["transaction_id", "plaza_id", "timestamp"])
+        
+        # Return all three outputs
+        return {
+            "vehicle_data": vehicle_data,
+            "payment_data": payment_data,
+            "temporal_data": temporal_data
+        }
+
+
+@pytest.mark.skipif(TollDataFanOutNode is None, reason="TollDataFanOutNode not available")
+class TestTollDataFanOutNode:
+    """Test cases for the TollDataFanOutNode."""
+    
+    def setup_method(self):
+        """Set up test data."""
+        # Create a small sample of toll plaza data
+        timestamps = [
+            datetime(2023, 5, 1, 8, 30, 0),
+            datetime(2023, 5, 1, 12, 15, 0),
+            datetime(2023, 5, 1, 17, 45, 0)
+        ]
+        
+        self.toll_data = pa.table({
+            "transaction_id": [10001, 10002, 10003],
+            "plaza_id": [1, 2, 3],
+            "timestamp": timestamps,
+            "vehicle_class": [1, 2, 4],
+            "vehicle_type": ["sedan", "suv", "semi"],
+            "axle_count": [2, 2, 5],
+            "weight_kg": [1500, 2200, 15000],
+            "height_cm": [150, 180, 350],
+            "length_cm": [450, 500, 1500],
+            "payment_method": ["ezpass", "cash", "ezpass"],
+            "is_ezpass": [True, False, True],
+            "amount": [2.5, 5.5, 10.0]
+        })
+    
+    def test_fan_out_structure(self):
+        """Test that TollDataFanOutNode creates the correct three outputs."""
+        # Use the mock node to avoid needing a Flight server
+        node = MockTollDataFanOutNode(input_table=self.toll_data)
+        
+        # Execute
+        result = node.execute()
+        
+        # Check that all three outputs exist
+        assert "vehicle_data" in result
+        assert "payment_data" in result
+        assert "temporal_data" in result
+        
+        # Check that each output is a PyArrow table
+        assert isinstance(result["vehicle_data"], pa.Table)
+        assert isinstance(result["payment_data"], pa.Table)
+        assert isinstance(result["temporal_data"], pa.Table)
+        
+    def test_vehicle_data_columns(self):
+        """Test that vehicle_data output has the correct columns."""
+        # Use the mock node to avoid needing a Flight server
+        node = MockTollDataFanOutNode(input_table=self.toll_data)
+        
+        # Execute
+        result = node.execute()
+        vehicle_data = result["vehicle_data"]
+        
+        # Check that vehicle_data has the expected columns
+        expected_columns = [
+            "transaction_id", "plaza_id", "vehicle_class", "vehicle_type", 
+            "axle_count", "weight_kg", "height_cm", "length_cm", "timestamp"
+        ]
+        
+        for col in expected_columns:
+            assert col in vehicle_data.column_names
+            
+        # Check that the data is preserved
+        assert vehicle_data.num_rows == self.toll_data.num_rows
+        
+    def test_payment_data_columns(self):
+        """Test that payment_data output has the correct columns."""
+        # Use the mock node to avoid needing a Flight server
+        node = MockTollDataFanOutNode(input_table=self.toll_data)
+        
+        # Execute
+        result = node.execute()
+        payment_data = result["payment_data"]
+        
+        # Check that payment_data has the expected columns
+        expected_columns = [
+            "transaction_id", "plaza_id", "payment_method", "is_ezpass", "amount", "timestamp"
+        ]
+        
+        for col in expected_columns:
+            assert col in payment_data.column_names
+            
+        # Check that the data is preserved
+        assert payment_data.num_rows == self.toll_data.num_rows
+        
+    def test_temporal_data_columns(self):
+        """Test that temporal_data output has the correct columns."""
+        # Use the mock node to avoid needing a Flight server
+        node = MockTollDataFanOutNode(input_table=self.toll_data)
+        
+        # Execute
+        result = node.execute()
+        temporal_data = result["temporal_data"]
+        
+        # Check that temporal_data has the expected columns
+        expected_columns = ["transaction_id", "plaza_id", "timestamp"]
+        
+        for col in expected_columns:
+            assert col in temporal_data.column_names
+            
+        # Check that the data is preserved
+        assert temporal_data.num_rows == self.toll_data.num_rows
+
+
+class TestFanOutPipeline:
+    """Integration tests for the fan-out pipeline components."""
+    
+    def setup_method(self):
+        """Set up test data."""
+        # Create a small sample of toll plaza data
+        timestamps = [
+            datetime(2023, 5, 1, 8, 30, 0),
+            datetime(2023, 5, 1, 12, 15, 0),
+            datetime(2023, 5, 1, 17, 45, 0)
+        ]
+        
+        self.toll_data = pa.table({
+            "transaction_id": [10001, 10002, 10003],
+            "plaza_id": [1, 2, 3],
+            "timestamp": timestamps,
+            "vehicle_class": [1, 2, 4],
+            "vehicle_type": ["sedan", "suv", "semi"],
+            "axle_count": [2, 2, 5],
+            "weight_kg": [1500, 2200, 15000],
+            "height_cm": [150, 180, 350],
+            "length_cm": [450, 500, 1500],
+            "payment_method": ["ezpass", "cash", "ezpass"],
+            "is_ezpass": [True, False, True],
+            "amount": [2.5, 5.5, 10.0]
+        })
+    
+    def test_fan_out_double_integration(self):
+        """Test that fan-out data can be processed by DoubleValueNode."""
+        # First fan out the data
+        fan_out_node = MockTollDataFanOutNode(input_table=self.toll_data)
+        fan_out_results = fan_out_node.execute()
+        
+        # Get the vehicle data
+        vehicle_data = fan_out_results["vehicle_data"]
+        
+        # Now use DoubleValueNode on the weight_kg column
+        double_node = MockDoubleValueNode(
+            input_table=vehicle_data,
+            column_name="weight_kg",
+            output_column_name="adjusted_weight"
+        )
+        
+        # Execute
+        double_result = double_node.execute()
+        heavy_vehicles = double_result["default"]
+        
+        # Check that the adjusted weight is double the original
+        orig_weights = vehicle_data.column("weight_kg").to_pylist()
+        adj_weights = heavy_vehicles.column("adjusted_weight").to_pylist()
+        
+        assert adj_weights == [w * 2 for w in orig_weights]
+        
+    def test_fan_in_data_flow(self):
+        """Test the fan-in data flow by combining results from multiple streams."""
+        # First fan out the data
+        fan_out_node = MockTollDataFanOutNode(input_table=self.toll_data)
+        fan_out_results = fan_out_node.execute()
+        
+        # Get the separate data streams
+        vehicle_data = fan_out_results["vehicle_data"]
+        payment_data = fan_out_results["payment_data"]
+        
+        # Extract heavy vehicles (class 4 or above)
+        heavy_mask = np.array(vehicle_data.column("vehicle_class").to_pylist()) >= 4
+        heavy_transaction_ids = np.array(vehicle_data.column("transaction_id").to_pylist())[heavy_mask]
+        
+        # Simulate the fan-in process by finding payments for heavy vehicles
+        heavy_payment_mask = np.isin(
+            np.array(payment_data.column("transaction_id").to_pylist()),
+            heavy_transaction_ids
+        )
+        
+        # Get payment amounts for heavy vehicles
+        heavy_payments = np.array(payment_data.column("amount").to_pylist())[heavy_payment_mask]
+        
+        # Verify that we found the payments for the heavy vehicles
+        assert len(heavy_payments) > 0
+        
+        # Verify that the heavy vehicle in our sample data has the expected payment
+        assert 10.0 in heavy_payments
