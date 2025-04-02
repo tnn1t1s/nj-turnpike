@@ -23,9 +23,12 @@ from nj_turnpike.identity_node import IdentityNode
 from nj_turnpike.double_flight_node import DoubleValueNode
 
 
-class TollDataFanOutNode(FlightNode):
+class TollDataFanOutNode:
     """
-    A specialized FlightNode that fans out toll plaza data into three distinct streams.
+    A specialized node that fans out toll plaza data into three distinct streams.
+    
+    Since the FlightNode no longer supports register_output, this implementation
+    now creates three separate FlightNodes for each of the outputs.
     
     Outputs three tables:
     - vehicle_data: Information about vehicle types and classifications
@@ -40,80 +43,86 @@ class TollDataFanOutNode(FlightNode):
         Args:
             input_table: The PyArrow table with toll plaza data
         """
-        # SQL that splits the data into three different aspects
-        sql = """
-        -- Vehicle data (first output)
-        WITH vehicle_data AS (
-            SELECT 
-                transaction_id,
-                plaza_id,
-                vehicle_class,
-                vehicle_type,
-                axle_count,
-                weight_kg,
-                height_cm,
-                length_cm,
-                timestamp
-            FROM input_table
-        ),
+        self.input_table = input_table
         
-        -- Payment data (second output)
-        payment_data AS (
-            SELECT 
-                transaction_id,
-                plaza_id,
-                payment_method,
-                is_ezpass,
-                amount,
-                timestamp
-            FROM input_table
-        ),
-        
-        -- Temporal data (third output)
-        temporal_data AS (
-            SELECT 
-                transaction_id,
-                plaza_id,
-                timestamp,
-                EXTRACT(HOUR FROM timestamp) AS hour_of_day,
-                EXTRACT(DOW FROM timestamp) AS day_of_week,
-                EXTRACT(MONTH FROM timestamp) AS month
-            FROM input_table
-        )
-        
-        -- Return vehicle_data as main output
-        SELECT * FROM vehicle_data
+        # SQL for vehicle data
+        vehicle_sql = """
+        SELECT 
+            transaction_id,
+            plaza_id,
+            vehicle_class,
+            vehicle_type,
+            axle_count,
+            weight_kg,
+            height_cm,
+            length_cm,
+            timestamp
+        FROM input_table
         """
         
-        # Initialize the parent FlightNode with our custom SQL
-        super().__init__(
-            expression=sql,
+        # SQL for payment data
+        payment_sql = """
+        SELECT 
+            transaction_id,
+            plaza_id,
+            payment_method,
+            is_ezpass,
+            amount,
+            timestamp
+        FROM input_table
+        """
+        
+        # SQL for temporal data
+        temporal_sql = """
+        SELECT 
+            transaction_id,
+            plaza_id,
+            timestamp,
+            EXTRACT(HOUR FROM timestamp) AS hour_of_day,
+            EXTRACT(DOW FROM timestamp) AS day_of_week,
+            EXTRACT(MONTH FROM timestamp) AS month
+        FROM input_table
+        """
+        
+        # Create the vehicle data node
+        self.vehicle_node = FlightNode(
+            expression=vehicle_sql,
             input_table=input_table,
             output_name="vehicle_data"
         )
         
-        # Create additional outputs
-        self.register_output("payment_data", """
-            SELECT 
-                transaction_id,
-                plaza_id,
-                payment_method,
-                is_ezpass,
-                amount,
-                timestamp
-            FROM input_table
-        """)
+        # Create the payment data node
+        self.payment_node = FlightNode(
+            expression=payment_sql,
+            input_table=input_table,
+            output_name="payment_data"
+        )
         
-        self.register_output("temporal_data", """
-            SELECT 
-                transaction_id,
-                plaza_id,
-                timestamp,
-                EXTRACT(HOUR FROM timestamp) AS hour_of_day,
-                EXTRACT(DOW FROM timestamp) AS day_of_week,
-                EXTRACT(MONTH FROM timestamp) AS month
-            FROM input_table
-        """)
+        # Create the temporal data node
+        self.temporal_node = FlightNode(
+            expression=temporal_sql,
+            input_table=input_table,
+            output_name="temporal_data"
+        )
+    
+    def execute(self) -> dict[str, pa.Table]:
+        """
+        Execute all three nodes and combine their outputs.
+        
+        Returns:
+            Dict[str, pa.Table]: Dictionary with all three outputs
+        """
+        # Execute all three nodes
+        vehicle_result = self.vehicle_node.execute()
+        payment_result = self.payment_node.execute()
+        temporal_result = self.temporal_node.execute()
+        
+        # Combine the results
+        return {
+            "vehicle_data": vehicle_result["vehicle_data"],
+            "payment_data": payment_result["payment_data"],
+            "temporal_data": temporal_result["temporal_data"]
+        }
 
 
 class TollPlazaFanOutPipeline(Pipeline):
@@ -145,10 +154,24 @@ class TollPlazaFanOutPipeline(Pipeline):
         
         for i in range(200):
             # Create timestamps throughout the day, with more during rush hours
-            hour = np.random.choice(
-                [7, 8, 9, 12, 17, 18, 19] + list(range(24)), 
-                p=[0.1, 0.1, 0.1, 0.05, 0.1, 0.1, 0.1, 0.016, 0.016, 0.016, 0.016, 0.016, 0.016, 0.016, 0.016, 0.016, 0.016, 0.016, 0.016, 0.016, 0.016, 0.016, 0.016, 0.016]
-            )
+            # Generate a list of all hours, then calculate probabilities that sum to 1
+            all_hours = [7, 8, 9, 12, 17, 18, 19] + list(range(24))
+            
+            # Assign more weight to peak hours
+            weights = []
+            for h in all_hours:
+                if h in [7, 8, 9, 17, 18, 19]:
+                    weights.append(0.07)  # Higher probability for peak hours
+                elif h == 12:
+                    weights.append(0.04)  # Medium probability for lunch hour
+                else:
+                    weights.append(0.015)  # Lower probability for other hours
+                    
+            # Normalize weights to ensure they sum to 1
+            total_weight = sum(weights)
+            probabilities = [w/total_weight for w in weights]
+            
+            hour = np.random.choice(all_hours, p=probabilities)
             minute = np.random.randint(0, 60)
             second = np.random.randint(0, 60)
             transaction_time = base_time.replace(hour=hour, minute=minute, second=second)
@@ -330,11 +353,16 @@ class TollPlazaFanOutPipeline(Pipeline):
         self.con.create_table("payment_data", payment_data, overwrite=True)
         
         # Calculate transaction metrics by payment method
-        payment_expr = self.con.table("payment_data").group_by("payment_method").aggregate([
-            self.con.table("payment_data").count().name("transaction_count"),
-            self.con.table("payment_data").amount.sum().name("total_revenue"),
-            self.con.table("payment_data").amount.mean().name("avg_transaction")
-        ]).order_by(self.con.table("payment_data").count().desc())
+        payment_table = self.con.table("payment_data")
+        payment_expr = (
+            payment_table.group_by("payment_method")
+            .aggregate({
+                "transaction_count": payment_table.count(),
+                "total_revenue": payment_table.amount.sum(),
+                "avg_transaction": payment_table.amount.mean()
+            })
+            .order_by(payment_table.count().desc())
+        )
         
         payment_node = Node(payment_expr, self.con)
         payment_metrics = payment_node.execute()["default"]
@@ -347,22 +375,24 @@ class TollPlazaFanOutPipeline(Pipeline):
             "avg_seconds": [2.1, 15.3, 11.2, 10.8]
         }), overwrite=True)
         
-        # Join payment data with processing times
-        efficiency_expr = (
-            self.con.table("payment_data")
-            .join(
-                self.con.table("processing_times"),
-                self.con.table("payment_data").payment_method == self.con.table("processing_times").payment_method
-            )
-            .group_by([self.con.table("payment_data").payment_method])
-            .aggregate([
-                self.con.table("payment_data").count().name("transaction_count"),
-                (self.con.table("payment_data").count() * self.con.table("processing_times").avg_seconds).name("total_processing_seconds")
-            ])
-        )
+        # Use direct SQL for efficiency metrics rather than ibis 
+        # since the Ibis API has changed significantly
+        direct_sql = """
+        SELECT 
+            pm.payment_method,
+            pm.transaction_count,
+            pm.transaction_count * pt.avg_seconds as total_processing_seconds
+        FROM (
+            SELECT 
+                payment_method,
+                COUNT(*) as transaction_count
+            FROM payment_data
+            GROUP BY payment_method
+        ) pm
+        JOIN processing_times pt ON pm.payment_method = pt.payment_method
+        """
         
-        efficiency_node = Node(efficiency_expr, self.con)
-        efficiency_metrics = efficiency_node.execute()["default"]
+        efficiency_metrics = self.con.raw_sql(direct_sql).fetch_arrow_table()
         self.outputs["efficiency_metrics"] = efficiency_metrics
         
         payment_time = time.time() - start_time
@@ -375,12 +405,13 @@ class TollPlazaFanOutPipeline(Pipeline):
         self.con.create_table("temporal_data", temporal_data, overwrite=True)
         
         # Calculate traffic patterns by hour
+        temporal_table = self.con.table("temporal_data")
         hourly_pattern_expr = (
-            self.con.table("temporal_data")
+            temporal_table
             .group_by("hour_of_day")
-            .aggregate([
-                self.con.table("temporal_data").count().name("transaction_count")
-            ])
+            .aggregate({
+                "transaction_count": temporal_table.count()
+            })
             .order_by("hour_of_day")
         )
         
@@ -390,11 +421,11 @@ class TollPlazaFanOutPipeline(Pipeline):
         
         # Calculate traffic patterns by day of week
         daily_pattern_expr = (
-            self.con.table("temporal_data")
+            temporal_table
             .group_by("day_of_week")
-            .aggregate([
-                self.con.table("temporal_data").count().name("transaction_count")
-            ])
+            .aggregate({
+                "transaction_count": temporal_table.count()
+            })
             .order_by("day_of_week")
         )
         
@@ -414,14 +445,15 @@ class TollPlazaFanOutPipeline(Pipeline):
         self.con.create_table("efficiency_metrics", efficiency_metrics, overwrite=True)
         
         # Staffing recommendations - simplified formula for demo purposes
+        hourly_table = self.con.table("hourly_patterns")
         staffing_expr = (
-            self.con.table("hourly_patterns")
-            .mutate([
+            hourly_table
+            .mutate({
                 # Calculate base staffing needed (simplistic formula for demo)
-                (self.con.table("hourly_patterns").transaction_count / 40).ceil().cast("int").name("min_staff_needed"),
+                "min_staff_needed": (hourly_table.transaction_count / 40).ceil().cast("int"),
                 # Classify as peak or off-peak hours
-                self.con.table("hourly_patterns").hour_of_day.isin([7, 8, 9, 17, 18, 19]).name("is_peak_hour")
-            ])
+                "is_peak_hour": hourly_table.hour_of_day.isin([7, 8, 9, 17, 18, 19])
+            })
         )
         
         staffing_node = Node(staffing_expr, self.con)
@@ -434,32 +466,27 @@ class TollPlazaFanOutPipeline(Pipeline):
             # Register heavy vehicle data
             self.con.create_table("heavy_vehicles", self.outputs["heavy_vehicles"], overwrite=True)
             
-            # Calculate projected revenue
-            revenue_expr = (
-                self.con.table("payment_data")
-                .join(
-                    self.con.table("heavy_vehicles"),
-                    self.con.table("payment_data").transaction_id == self.con.table("heavy_vehicles").transaction_id,
-                    how="left"
-                )
-                .mutate([
-                    # If it's a heavy vehicle with adjusted weight, increase the rate
-                    self.con.case()
-                    .when(self.con.table("heavy_vehicles").adjusted_weight.notnull(), 
-                          self.con.table("payment_data").amount * 1.5)
-                    .else_(self.con.table("payment_data").amount)
-                    .end().name("projected_amount")
-                ])
-                .group_by([])
-                .aggregate([
-                    self.con.table("payment_data").amount.sum().name("current_revenue"),
-                    self.con.expr("sum(projected_amount)").name("projected_revenue"),
-                    (self.con.expr("sum(projected_amount)") / self.con.table("payment_data").amount.sum() - 1).name("percent_increase")
-                ])
+            # Use direct SQL for revenue projection
+            revenue_sql = """
+            WITH projected AS (
+                SELECT 
+                    p.transaction_id,
+                    p.amount,
+                    CASE 
+                        WHEN h.adjusted_weight IS NOT NULL THEN p.amount * 1.5
+                        ELSE p.amount
+                    END AS projected_amount
+                FROM payment_data p
+                LEFT JOIN heavy_vehicles h ON p.transaction_id = h.transaction_id
             )
+            SELECT 
+                SUM(amount) AS current_revenue,
+                SUM(projected_amount) AS projected_revenue,
+                (SUM(projected_amount) / SUM(amount) - 1) * 100 AS percent_increase
+            FROM projected
+            """
             
-            revenue_node = Node(revenue_expr, self.con)
-            revenue_projection = revenue_node.execute()["default"]
+            revenue_projection = self.con.raw_sql(revenue_sql).fetch_arrow_table()
             self.outputs["revenue_projection"] = revenue_projection
         
         fan_in_time = time.time() - start_time
